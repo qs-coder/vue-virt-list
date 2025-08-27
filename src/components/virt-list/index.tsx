@@ -77,6 +77,16 @@ function useVirtList<T extends Record<string, any>>(
 
   let fixTaskFn: null | (() => void) = null;
 
+  // 添加防抖相关变量和性能优化
+  let resizeDebounceTimer: number | null = null;
+  let scrollCorrectionTimer: number | null = null;
+  let isScrolling = false;
+  let rafId: number | null = null;
+  
+  // 缓存计算结果
+  const itemSizeCache = {} as Record<string, number>;
+  let lastCalcRangeParams: { offset: number; inViewBegin: number } | null = null;
+
   const slotSize: ShallowReactive<SlotSize> = shallowReactive({
     clientSize: 0,
     headerSize: 0,
@@ -133,13 +143,28 @@ function useVirtList<T extends Record<string, any>>(
   }
   function getItemSize(itemKey: string) {
     if (props.fixed) return props.minSize + props.itemGap;
-    return sizesMap.get(String(itemKey)) ?? props.minSize + props.itemGap;
+    
+    const key = String(itemKey);
+    // 使用缓存提高性能
+    if (key in itemSizeCache) {
+      return itemSizeCache[key];
+    }
+    
+    const size = sizesMap.get(key) ?? props.minSize + props.itemGap;
+    itemSizeCache[key] = size;
+    return size;
   }
   function setItemSize(itemKey: string, size: number) {
-    sizesMap.set(String(itemKey), size);
+    const key = String(itemKey);
+    sizesMap.set(key, size);
+    // 同步更新缓存
+    itemSizeCache[key] = size;
   }
   function deleteItemSize(itemKey: string) {
-    sizesMap.delete(String(itemKey));
+    const key = String(itemKey);
+    sizesMap.delete(key);
+    // 同步删除缓存
+    delete itemSizeCache[key];
   }
   // 通过下标来获取元素位置信息
   function getItemPosByIndex(index: number) {
@@ -323,15 +348,26 @@ function useVirtList<T extends Record<string, any>>(
       fixSelection();
     }
 
-    if (start < reactiveData.inViewBegin) {
+    // 添加边界检查，确保start在有效范围内
+    const listLength = props.list?.length ?? 0;
+    if (listLength === 0) {
+      reactiveData.inViewBegin = 0;
+      reactiveData.inViewEnd = 0;
+      emitFunction?.rangeUpdate?.(0, 0);
+      return;
+    }
+    
+    const safeStart = Math.max(0, Math.min(start, listLength - 1));
+    
+    if (safeStart < reactiveData.inViewBegin) {
       // 向上滚动需要修正
       fixOffset = true;
     }
 
-    reactiveData.inViewBegin = start;
+    reactiveData.inViewBegin = safeStart;
     reactiveData.inViewEnd = Math.min(
-      start + reactiveData.views,
-      props.list.length - 1,
+      safeStart + reactiveData.views,
+      listLength - 1,
     );
 
     // expose
@@ -344,6 +380,13 @@ function useVirtList<T extends Record<string, any>>(
   function calcRange() {
     const { views, offset, inViewBegin } = reactiveData;
     const { itemKey } = props;
+    const listLength = props.list?.length ?? 0;
+
+    // 空列表处理
+    if (listLength === 0) {
+      updateRange(0);
+      return;
+    }
 
     const offsetWithNoHeader = offset - slotSize.headerSize;
     let start = inViewBegin;
@@ -355,37 +398,45 @@ function useVirtList<T extends Record<string, any>>(
       return;
     }
 
+    // 缓存优化：如果参数没有显著变化，跳过计算
+    if (lastCalcRangeParams && 
+        Math.abs(lastCalcRangeParams.offset - offset) < 1 && 
+        lastCalcRangeParams.inViewBegin === inViewBegin) {
+      return;
+    }
+    lastCalcRangeParams = { offset, inViewBegin };
+
+    // 添加稳定性检查，避免频繁的范围变化
+    const tolerance = 2; // 增加容差到2px
+    
     if (direction === 'forward') {
-      // 1. 没发生变化
-      if (offsetWithNoHeader >= offsetReduce) {
-        // console.log(`👆🏻👆🏻👆🏻👆🏻 for break 没变 start ${start}`);
+      // 1. 没发生变化或变化很小
+      if (offsetWithNoHeader >= offsetReduce - tolerance) {
         return;
       }
-      for (let i = start - 1; i >= 0; i -= 1) {
-        // 2. 变化了
+      // 优化：限制循环范围，避免过度计算
+      const maxIterations = Math.min(start, 50);
+      for (let i = start - 1, iterations = 0; i >= 0 && iterations < maxIterations; i -= 1, iterations += 1) {
         const currentSize = getItemSize(props.list[i]?.[itemKey]);
         offsetReduce -= currentSize;
-        // 要计算2个header插槽的高度
         if (
           offsetReduce <= offsetWithNoHeader &&
           offsetWithNoHeader < offsetReduce + currentSize
         ) {
           start = i;
-          // console.log(`👆🏻👆🏻👆🏻👆🏻 for break 变了 start ${start}`);
           break;
         }
       }
     }
 
     if (direction === 'backward') {
-      if (offsetWithNoHeader <= offsetReduce) {
-        // console.log(`👆🏻👆🏻👆🏻👆🏻 for break 没变 start ${start}`);
+      if (offsetWithNoHeader <= offsetReduce + tolerance) {
         return;
       }
-      for (let i = start; i <= props.list.length - 1; i += 1) {
-        // 2. 变化了
+      // 优化：限制循环范围，避免过度计算
+      const maxIterations = Math.min(listLength - start, 50);
+      for (let i = start, iterations = 0; i <= listLength - 1 && iterations < maxIterations; i += 1, iterations += 1) {
         const currentSize = getItemSize(props.list[i]?.[itemKey]);
-        // console.log('currentSize', i, props.list[i]?.[itemKey], currentSize);
 
         if (
           offsetReduce <= offsetWithNoHeader &&
@@ -401,9 +452,10 @@ function useVirtList<T extends Record<string, any>>(
       fixOffset = false;
     }
 
-    // 节流
-    if (start !== reactiveData.inViewBegin) {
-      updateRange(start);
+    // 节流 - 只有当变化足够大时才更新，并确保start在有效范围内
+    const safeStart = Math.max(0, Math.min(start, listLength - 1));
+    if (Math.abs(safeStart - reactiveData.inViewBegin) >= 1) {
+      updateRange(safeStart);
     }
   }
 
@@ -428,19 +480,37 @@ function useVirtList<T extends Record<string, any>>(
   }
 
   function onScroll(evt: Event) {
-    // console.log('onscroll');
-
     emitFunction?.scroll?.(evt);
 
     const offset = getOffset();
 
     if (offset === reactiveData.offset) return;
+    
+    // 设置滚动状态
+    isScrolling = true;
+    
+    // 清除之前的滚动纠正定时器和RAF
+    if (scrollCorrectionTimer) {
+      clearTimeout(scrollCorrectionTimer);
+    }
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+    }
+    
     direction = offset < reactiveData.offset ? 'forward' : 'backward';
     reactiveData.offset = offset;
 
-    calcRange();
-
-    judgePosition();
+    // 使用requestAnimationFrame来优化性能，避免重复调用
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      calcRange();
+      judgePosition();
+    });
+    
+    // 滚动结束后重置状态
+    scrollCorrectionTimer = window.setTimeout(() => {
+      isScrolling = false;
+    }, 150); // 增加到150ms，减少频繁的状态切换
   }
 
   function calcViews() {
@@ -471,8 +541,6 @@ function useVirtList<T extends Record<string, any>>(
   }
 
   function reset() {
-    // console.log('[VirtList] reset');
-
     reactiveData.offset = 0;
     reactiveData.listTotalSize = 0;
     reactiveData.virtualSize = 0;
@@ -482,7 +550,13 @@ function useVirtList<T extends Record<string, any>>(
 
     reactiveData.renderBegin = 0;
     reactiveData.renderEnd = 0;
+    
+    // 清理所有缓存
     sizesMap.clear();
+    Object.keys(itemSizeCache).forEach(key => {
+      delete itemSizeCache[key];
+    });
+    lastCalcRangeParams = null;
 
     // [require] 当列表为空时，需要重新渲染，否则会残留渲染
     forceUpdate();
@@ -519,13 +593,21 @@ function useVirtList<T extends Record<string, any>>(
   let resizeObserver: ResizeObserver | undefined = undefined;
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver((entries) => {
-      // FIXME 这里加了requestIdleCallback会有问题，暂时不知道为什么
-      // 延迟执行，快速滚动的时候是没有必要的
-      // requestIdleCallback(() => {
-      let diff = 0;
-      for (const entry of entries) {
-        const id = (entry.target as HTMLElement).dataset.id;
-        if (id) {
+      // 清除之前的防抖定时器
+      if (resizeDebounceTimer) {
+        clearTimeout(resizeDebounceTimer);
+      }
+      
+      // 使用防抖来减少频繁的resize处理
+       resizeDebounceTimer = window.setTimeout(() => {
+        let diff = 0;
+        let hasSignificantChange = false;
+        
+        for (const entry of entries) {
+          const target = entry.target as HTMLElement;
+          const id = target?.dataset?.id;
+          if (!id) continue;
+          
           const oldSize = getItemSize(id);
 
           let newSize = 0;
@@ -545,39 +627,64 @@ function useVirtList<T extends Record<string, any>>(
               : entry.contentRect.height;
           }
 
+          // 处理特殊元素
           if (id === 'client') {
-            slotSize.clientSize = newSize;
-            onClientResize();
+            if (Math.abs(slotSize.clientSize - newSize) > 1) {
+              slotSize.clientSize = newSize;
+              onClientResize();
+              hasSignificantChange = true;
+            }
           } else if (id === 'header') {
-            slotSize.headerSize = newSize;
+            if (Math.abs(slotSize.headerSize - newSize) > 0.5) {
+              slotSize.headerSize = newSize;
+              hasSignificantChange = true;
+            }
           } else if (id === 'footer') {
-            slotSize.footerSize = newSize;
+            if (Math.abs(slotSize.footerSize - newSize) > 0.5) {
+              slotSize.footerSize = newSize;
+              hasSignificantChange = true;
+            }
           } else if (id === 'stickyHeader') {
-            slotSize.stickyHeaderSize = newSize;
+            if (Math.abs(slotSize.stickyHeaderSize - newSize) > 0.5) {
+              slotSize.stickyHeaderSize = newSize;
+              hasSignificantChange = true;
+            }
           } else if (id === 'stickyFooter') {
-            slotSize.stickyFooterSize = newSize;
-          } else if (oldSize !== newSize) {
+            if (Math.abs(slotSize.stickyFooterSize - newSize) > 0.5) {
+              slotSize.stickyFooterSize = newSize;
+              hasSignificantChange = true;
+            }
+          } else if (Math.abs(oldSize - newSize) > 1) { // 增加阈值到1px避免微小变化
             setItemSize(id, newSize);
             diff += newSize - oldSize;
             emitFunction?.itemResize?.(id, newSize);
+            hasSignificantChange = true;
           }
         }
-      }
-      reactiveData.listTotalSize += diff;
+        
+        if (Math.abs(diff) > 1) { // 只有当差异足够大时才更新
+          reactiveData.listTotalSize += diff;
+        }
 
-      // 如果有需要修正的方法进行修正
-      if (fixTaskFn) {
-        fixTaskFn();
-      }
-      // console.log(fixOffset, forceFixOffset, diff);
-      // 向上滚动纠正误差 - 当没有顶部buffer的时候是需要的
-      if ((fixOffset || forceFixOffset) && diff !== 0 && !abortFixOffset) {
-        fixOffset = false;
-        forceFixOffset = false;
-        scrollToOffset(reactiveData.offset + diff);
-        // console.log('纠正误差', reactiveData.offset, diff);
-      }
-      abortFixOffset = false;
+        // 如果有需要修正的方法进行修正
+        if (fixTaskFn) {
+          fixTaskFn();
+        }
+        
+        // 向上滚动纠正误差 - 当没有顶部buffer的时候是需要的
+        // 添加滚动状态检查，避免在滚动过程中进行纠正
+        if ((fixOffset || forceFixOffset) && Math.abs(diff) > 1 && !abortFixOffset && !isScrolling && hasSignificantChange) {
+          fixOffset = false;
+          forceFixOffset = false;
+          scrollToOffset(reactiveData.offset + diff);
+        }
+        abortFixOffset = false;
+        
+        // 清理缓存以确保下次计算的准确性
+        if (hasSignificantChange) {
+          lastCalcRangeParams = null;
+        }
+      }, 16); // 使用16ms防抖，约等于一帧的时间
     });
   }
 
@@ -632,13 +739,28 @@ function useVirtList<T extends Record<string, any>>(
   });
 
   onBeforeUnmount(() => {
+    // 清理所有定时器和RAF
+    if (resizeDebounceTimer) {
+      clearTimeout(resizeDebounceTimer);
+      resizeDebounceTimer = null;
+    }
+    if (scrollCorrectionTimer) {
+      clearTimeout(scrollCorrectionTimer);
+      scrollCorrectionTimer = null;
+    }
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    
+    // 清理事件监听器
     if (clientRefEl.value) {
       clientRefEl.value.removeEventListener('scroll', onScroll);
-
       resizeObserver?.unobserve(clientRefEl.value);
       slotSize.clientSize = 0;
     }
 
+    // 清理所有ResizeObserver
     if (stickyHeaderRefEl.value) {
       resizeObserver?.unobserve(stickyHeaderRefEl.value);
       slotSize.stickyHeaderSize = 0;
@@ -655,6 +777,23 @@ function useVirtList<T extends Record<string, any>>(
       resizeObserver?.unobserve(footerRefEl.value);
       slotSize.footerSize = 0;
     }
+    
+    // 断开ResizeObserver连接
+    resizeObserver?.disconnect();
+    
+    // 清理缓存和状态
+    sizesMap.clear();
+    Object.keys(itemSizeCache).forEach(key => {
+      delete itemSizeCache[key];
+    });
+    lastCalcRangeParams = null;
+    fixTaskFn = null;
+    
+    // 重置状态标志
+    isScrolling = false;
+    fixOffset = false;
+    forceFixOffset = false;
+    abortFixOffset = false;
   });
 
   function getVirtualSize2beginInView() {
@@ -700,10 +839,13 @@ function useVirtList<T extends Record<string, any>>(
         _oldRenderBegin,
       );
     }
-    // update render list
+    // update render list - 添加边界检查防止重复渲染
+    const safeRenderBegin = Math.max(0, Math.min(_newRenderBegin, props.list.length - 1));
+    const safeRenderEnd = Math.max(safeRenderBegin, Math.min(_newRenderEnd, props.list.length - 1));
+    
     renderList.value = props.list.slice(
-      reactiveData.renderBegin,
-      reactiveData.renderEnd + 1,
+      safeRenderBegin,
+      safeRenderEnd + 1,
     );
     // update size
     updateTotalVirtualSize();
@@ -759,10 +901,13 @@ function useVirtList<T extends Record<string, any>>(
             _oldRenderBegin,
           );
         }
-        // update render list
+        // update render list - 添加边界检查防止重复渲染
+        const safeRenderBegin = Math.max(0, Math.min(reactiveData.renderBegin, props.list.length - 1));
+        const safeRenderEnd = Math.max(safeRenderBegin, Math.min(reactiveData.renderEnd, props.list.length - 1));
+        
         renderList.value = props.list.slice(
-          reactiveData.renderBegin,
-          reactiveData.renderEnd + 1,
+          safeRenderBegin,
+          safeRenderEnd + 1,
         );
       }
     },
@@ -950,7 +1095,7 @@ const VirtList = defineComponent({
     },
   },
   setup(props: any, context: SetupContext) {
-    const emitFunction: EmitFunction<any> = {
+    const emitFunction = {
       scroll: (e: Event) => {
         context.emit('scroll', e);
       },
@@ -1007,7 +1152,7 @@ const VirtList = defineComponent({
                 'data-id': 'stickyHeader',
               },
             },
-            [getSlot(this, 'stickyHeader')?.()],
+            [getSlot(this, 'stickyHeader')?.() as any],
           )
         : null;
 
@@ -1028,7 +1173,7 @@ const VirtList = defineComponent({
                 'data-id': 'stickyFooter',
               },
             },
-            [getSlot(this, 'stickyFooter')?.()],
+            [getSlot(this, 'stickyFooter')?.() as any],
           )
         : null;
 
@@ -1043,7 +1188,7 @@ const VirtList = defineComponent({
               ref: 'headerRefEl',
               attrs: { 'data-id': 'header' },
             },
-            [getSlot(this, 'header')?.()],
+            [getSlot(this, 'header')?.() as any],
           )
         : null;
 
@@ -1060,7 +1205,7 @@ const VirtList = defineComponent({
                 'data-id': 'footer',
               },
             },
-            [getSlot(this, 'footer')?.()],
+            [getSlot(this, 'footer')?.() as any],
           )
         : null;
 
@@ -1070,11 +1215,13 @@ const VirtList = defineComponent({
       const mainList = [];
       for (let index = 0; index < renderList.length; index += 1) {
         const currentItem = renderList[index];
+        // 确保key的唯一性，使用renderBegin + index作为key
+        const uniqueKey = `${currentItem[itemKey]}-${renderBegin + index}`;
         mainList.push(
           _hChild(
             ObserverItem,
             {
-              key: currentItem[itemKey],
+              key: uniqueKey,
               class:
                 typeof itemClass === 'function'
                   ? itemClass(currentItem, index)
@@ -1090,13 +1237,10 @@ const VirtList = defineComponent({
                 resizeObserver: resizeObserver,
               },
             },
-            getSlot(
-              this,
-              'default',
-            )?.({
+            getSlot(this, 'default')?.({ 
               itemData: currentItem,
               index: renderBegin + index,
-            }),
+            }) || null,
           ),
         );
       }
@@ -1110,7 +1254,7 @@ const VirtList = defineComponent({
               key: `slot-empty-${height}`,
               style: `height: ${height}px`,
             },
-            [getSlot(this, 'empty')?.()],
+            [getSlot(this, 'empty')?.() as any],
           ),
         );
       }

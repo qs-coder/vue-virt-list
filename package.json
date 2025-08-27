@@ -1,8 +1,8 @@
 {
-  "name": "vue-virt-list",
+  "name": "@qs-coder/vue-virt-list",
   "version": "1.6.0",
   "description": "Tiny & Virtual scroll list & Huge amount data & High performance (support vue2.x&vue3.x)",
-  "author": "kolarorz",
+  "author": "qs-coder",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -63,12 +63,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kolarorz/vue-virt-list.git"
+    "url": "git+https://github.com/qs-coder/vue-virt-list.git"
   },
   "bugs": {
-    "url": "https://github.com/kolarorz/vue-virt-list/issues"
+    "url": "https://github.com/qs-coder/vue-virt-list/issues"
   },
-  "homepage": "https://github.com/kolarorz/vue-virt-list#readme",
+  "homepage": "https://github.com/qs-coder/vue-virt-list#readme",
   "directories": {
     "docs": "docs",
     "lib": "lib"
