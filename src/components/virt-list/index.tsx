@@ -5,7 +5,6 @@ import {
   onBeforeMount,
   onMounted,
   onBeforeUnmount,
-  onActivated,
   shallowReactive,
   ref,
   shallowRef,
@@ -737,31 +736,6 @@ function useVirtList<T extends Record<string, any>>(
     } else if (props.offset) {
       scrollToOffset(props.offset);
     }
-  });
-
-  // 处理 keep-alive 激活时的问题
-  onActivated(() => {
-    // 清理缓存，确保重新计算
-    lastCalcRangeParams = null;
-    
-    // 延迟执行，确保DOM已经完全渲染
-    setTimeout(() => {
-      // 强制更新可视区域计算
-      forceUpdate();
-      
-      // 如果有滚动位置，重新设置
-      if (clientRefEl.value) {
-        const currentScrollTop = clientRefEl.value.scrollTop;
-        if (currentScrollTop > 0) {
-           // 触发滚动事件重新计算可视区域
-           const mockEvent = new Event('scroll');
-           onScroll(mockEvent);
-         } else {
-           // 如果在顶部，确保正确显示第一屏内容
-           updateRange(0);
-         }
-      }
-    }, 0);
   });
 
   onBeforeUnmount(() => {
