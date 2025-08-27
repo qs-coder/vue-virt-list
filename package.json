@@ -15,6 +15,10 @@
     "lint": "eslint ./example --ext .vue,.ts,.tsx,.js,.jsx --fix",
     "test": "vitest"
   },
+  "files": [
+    "lib",
+    "docs"
+  ],
   "peerDependencies": {
     "@vue/composition-api": "^1.0.0-rc.1",
     "vue": "^2.0.0 || >=3.0.0"

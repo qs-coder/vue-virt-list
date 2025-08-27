@@ -21,6 +21,7 @@ node_modules
 dist
 dist-ssr
 *.local
+lib
 
 /cypress/videos/
 /cypress/screenshots/
