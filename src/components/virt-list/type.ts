@@ -115,4 +115,5 @@ export type VirtListReturn<T extends Record<string, string>> = {
     bottom: number;
   };
   forceUpdate: () => void;
+  checkVisibility: () => void;
 };

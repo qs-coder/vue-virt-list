@@ -5,6 +5,8 @@ import {
   onBeforeMount,
   onMounted,
   onBeforeUnmount,
+  onActivated,
+  onDeactivated,
   shallowReactive,
   ref,
   shallowRef,
@@ -428,18 +430,29 @@ function useVirtList<T extends Record<string, any>>(
   }
 
   function onScroll(evt: Event) {
-    // console.log('onscroll');
-
     emitFunction?.scroll?.(evt);
-
+    
+    // 标记用户正在滚动
+    isUserScrolling = true;
+    
+    // 清除用户滚动标记的定时器
+    if (userScrollTimer) {
+      clearTimeout(userScrollTimer);
+    }
+    
+    // 200ms后认为用户停止滚动
+    userScrollTimer = setTimeout(() => {
+      isUserScrolling = false;
+      userScrollTimer = null;
+    }, 200);
+    
     const offset = getOffset();
-
     if (offset === reactiveData.offset) return;
+    
     direction = offset < reactiveData.offset ? 'forward' : 'backward';
     reactiveData.offset = offset;
-
+    
     calcRange();
-
     judgePosition();
   }
 
@@ -454,6 +467,27 @@ function useVirtList<T extends Record<string, any>>(
     // 可视区域尺寸变化 => 1. 更新可视区域个数 2. 可视区域个数变化后需要及时更新记录尺寸
     calcViews();
     updateRange(reactiveData.inViewBegin);
+  }
+  
+  // 检查并恢复容器尺寸（用于处理v-show场景）
+  function checkAndRestoreContainerSize() {
+    if (clientRefEl.value) {
+      const rect = clientRefEl.value.getBoundingClientRect();
+      const currentSize = props.horizontal ? rect.width : rect.height;
+      
+      // 如果当前容器有实际尺寸但slotSize中记录的是0，说明可能是v-show导致的问题
+      if (currentSize > 0 && slotSize.clientSize === 0) {
+        slotSize.clientSize = currentSize;
+        onClientResize();
+        console.log('恢复容器尺寸:', currentSize);
+      }
+      // 如果容器尺寸发生变化，也需要更新
+      else if (currentSize > 0 && Math.abs(slotSize.clientSize - currentSize) > 1) {
+        slotSize.clientSize = currentSize;
+        onClientResize();
+        console.log('更新容器尺寸:', currentSize);
+      }
+    }
   }
 
   function calcListTotalSize() {
@@ -516,13 +550,18 @@ function useVirtList<T extends Record<string, any>>(
     renderKey.value += 1;
   }
 
+  // 添加防抖和用户滚动检测
+  let resizeDebounceTimer: any = null;
+  let userScrollTimer: any = null;
+  let isUserScrolling = false;
+
   let resizeObserver: ResizeObserver | undefined = undefined;
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver((entries) => {
-      // FIXME 这里加了requestIdleCallback会有问题，暂时不知道为什么
-      // 延迟执行，快速滚动的时候是没有必要的
-      // requestIdleCallback(() => {
       let diff = 0;
+      let sizeChanges: Array<{id: string, oldSize: number, newSize: number}> = [];
+      
+      // 收集所有尺寸变化
       for (const entry of entries) {
         const id = (entry.target as HTMLElement).dataset.id;
         if (id) {
@@ -545,6 +584,7 @@ function useVirtList<T extends Record<string, any>>(
               : entry.contentRect.height;
           }
 
+          // 处理不同类型的尺寸变化
           if (id === 'client') {
             slotSize.clientSize = newSize;
             onClientResize();
@@ -559,24 +599,38 @@ function useVirtList<T extends Record<string, any>>(
           } else if (oldSize !== newSize) {
             setItemSize(id, newSize);
             diff += newSize - oldSize;
+            sizeChanges.push({id, oldSize, newSize});
             emitFunction?.itemResize?.(id, newSize);
           }
         }
       }
+      
       reactiveData.listTotalSize += diff;
-
+      
       // 如果有需要修正的方法进行修正
       if (fixTaskFn) {
         fixTaskFn();
       }
-      // console.log(fixOffset, forceFixOffset, diff);
-      // 向上滚动纠正误差 - 当没有顶部buffer的时候是需要的
+      
+      // 智能滚动修正：只在必要时且用户未滚动时进行
       if ((fixOffset || forceFixOffset) && diff !== 0 && !abortFixOffset) {
-        fixOffset = false;
-        forceFixOffset = false;
-        scrollToOffset(reactiveData.offset + diff);
-        // console.log('纠正误差', reactiveData.offset, diff);
+        // 清除之前的防抖定时器
+        if (resizeDebounceTimer) {
+          clearTimeout(resizeDebounceTimer);
+        }
+        
+        // 防抖处理：延迟执行滚动修正
+        resizeDebounceTimer = setTimeout(() => {
+          // 只在用户未主动滚动时进行修正
+          if (!isUserScrolling) {
+            fixOffset = false;
+            forceFixOffset = false;
+            scrollToOffset(reactiveData.offset + diff);
+          }
+          resizeDebounceTimer = null;
+        }, direction === 'forward' ? 50 : 100); // 向上滚动更快响应
       }
+      
       abortFixOffset = false;
     });
   }
@@ -624,12 +678,27 @@ function useVirtList<T extends Record<string, any>>(
       resizeObserver?.observe(footerRefEl.value);
     }
 
+    // 初始化容器尺寸检查
+    checkAndRestoreContainerSize();
+
     if (props.start) {
       scrollToIndex(props.start);
     } else if (props.offset) {
       scrollToOffset(props.offset);
     }
   });
+
+  function checkVisibility() {
+    if (clientRefEl.value) {
+      const rect = clientRefEl.value.getBoundingClientRect();
+      const isVisible = rect.width > 0 && rect.height > 0;
+      
+      if (isVisible && slotSize.clientSize === 0) {
+        // 容器变为可见但尺寸记录为0，需要恢复尺寸
+        checkAndRestoreContainerSize();
+      }
+    }
+  };
 
   onBeforeUnmount(() => {
     if (clientRefEl.value) {
@@ -654,6 +723,57 @@ function useVirtList<T extends Record<string, any>>(
     if (footerRefEl.value) {
       resizeObserver?.unobserve(footerRefEl.value);
       slotSize.footerSize = 0;
+    }
+  });
+
+  // keep-alive 激活时重新绑定事件和观察器
+  onActivated(() => {
+    if (clientRefEl.value) {
+      clientRefEl.value.addEventListener('scroll', onScroll);
+      resizeObserver?.observe(clientRefEl.value);
+    }
+
+    if (stickyHeaderRefEl.value) {
+      resizeObserver?.observe(stickyHeaderRefEl.value);
+    }
+    if (stickyFooterRefEl.value) {
+      resizeObserver?.observe(stickyFooterRefEl.value);
+    }
+    if (headerRefEl.value) {
+      resizeObserver?.observe(headerRefEl.value);
+    }
+    if (footerRefEl.value) {
+      resizeObserver?.observe(footerRefEl.value);
+    }
+
+    // 检查并恢复容器尺寸（处理v-show场景）
+    checkAndRestoreContainerSize();
+
+    // 重新计算列表总尺寸和渲染范围
+    calcListTotalSize();
+    updateRange(reactiveData.inViewBegin);
+    updateTotalVirtualSize();
+    forceUpdate();
+  });
+
+  // keep-alive 失活时清理事件监听器
+  onDeactivated(() => {
+    if (clientRefEl.value) {
+      clientRefEl.value.removeEventListener('scroll', onScroll);
+      resizeObserver?.unobserve(clientRefEl.value);
+    }
+
+    if (stickyHeaderRefEl.value) {
+      resizeObserver?.unobserve(stickyHeaderRefEl.value);
+    }
+    if (stickyFooterRefEl.value) {
+      resizeObserver?.unobserve(stickyFooterRefEl.value);
+    }
+    if (headerRefEl.value) {
+      resizeObserver?.unobserve(headerRefEl.value);
+    }
+    if (footerRefEl.value) {
+      resizeObserver?.unobserve(footerRefEl.value);
     }
   });
 
@@ -705,7 +825,7 @@ function useVirtList<T extends Record<string, any>>(
       reactiveData.renderBegin,
       reactiveData.renderEnd + 1,
     );
-    // update size
+    // update size - 只调用一次完整计算，避免重复计算导致的错误
     updateTotalVirtualSize();
   }
 
@@ -764,6 +884,8 @@ function useVirtList<T extends Record<string, any>>(
           reactiveData.renderBegin,
           reactiveData.renderEnd + 1,
         );
+        // update virtualSize - 使用完整计算确保准确性
+        updateTotalVirtualSize();
       }
     },
     {
@@ -829,6 +951,7 @@ function useVirtList<T extends Record<string, any>>(
     addedList2Top,
     getItemPosByIndex,
     forceUpdate,
+    checkVisibility,
   };
 }
 const VirtList = defineComponent({
@@ -1070,6 +1193,7 @@ const VirtList = defineComponent({
       const mainList = [];
       for (let index = 0; index < renderList.length; index += 1) {
         const currentItem = renderList[index];
+        const originalIndex = renderBegin + index;
         mainList.push(
           _hChild(
             ObserverItem,
@@ -1077,12 +1201,12 @@ const VirtList = defineComponent({
               key: currentItem[itemKey],
               class:
                 typeof itemClass === 'function'
-                  ? itemClass(currentItem, index)
+                  ? itemClass(currentItem, originalIndex)
                   : itemClass,
               style: mergeStyles(
                 itemGap > 0 ? `padding: ${itemGap / 2}px 0;` : '',
                 typeof itemStyle === 'function'
-                  ? itemStyle(currentItem, index)
+                  ? itemStyle(currentItem, originalIndex)
                   : itemStyle,
               ),
               attrs: {
@@ -1095,7 +1219,7 @@ const VirtList = defineComponent({
               'default',
             )?.({
               itemData: currentItem,
-              index: renderBegin + index,
+              index: originalIndex,
             }),
           ),
         );
