@@ -25,7 +25,7 @@ export const en = defineConfig({
           },
         ],
       },
-      // 开发中
+      // Under development
       // { text: 'Playground', link: '/playground/' },
     ],
 
@@ -93,6 +93,8 @@ function sidebarExamples(): DefaultTheme.SidebarItem[] {
               text: 'Pagination',
               link: 'pagination',
             },
+
+            { text: 'keep-alive', link: 'keep-alive' },
           ],
         },
 

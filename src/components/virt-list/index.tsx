@@ -431,27 +431,27 @@ function useVirtList<T extends Record<string, any>>(
 
   function onScroll(evt: Event) {
     emitFunction?.scroll?.(evt);
-    
+
     // 标记用户正在滚动
     isUserScrolling = true;
-    
+
     // 清除用户滚动标记的定时器
     if (userScrollTimer) {
       clearTimeout(userScrollTimer);
     }
-    
+
     // 200ms后认为用户停止滚动
     userScrollTimer = setTimeout(() => {
       isUserScrolling = false;
       userScrollTimer = null;
     }, 200);
-    
+
     const offset = getOffset();
     if (offset === reactiveData.offset) return;
-    
+
     direction = offset < reactiveData.offset ? 'forward' : 'backward';
     reactiveData.offset = offset;
-    
+
     calcRange();
     judgePosition();
   }
@@ -468,13 +468,13 @@ function useVirtList<T extends Record<string, any>>(
     calcViews();
     updateRange(reactiveData.inViewBegin);
   }
-  
+
   // 检查并恢复容器尺寸（用于处理v-show场景）
   function checkAndRestoreContainerSize() {
     if (clientRefEl.value) {
       const rect = clientRefEl.value.getBoundingClientRect();
       const currentSize = props.horizontal ? rect.width : rect.height;
-      
+
       // 如果当前容器有实际尺寸但slotSize中记录的是0，说明可能是v-show导致的问题
       if (currentSize > 0 && slotSize.clientSize === 0) {
         slotSize.clientSize = currentSize;
@@ -560,7 +560,7 @@ function useVirtList<T extends Record<string, any>>(
     resizeObserver = new ResizeObserver((entries) => {
       let diff = 0;
       let sizeChanges: Array<{id: string, oldSize: number, newSize: number}> = [];
-      
+
       // 收集所有尺寸变化
       for (const entry of entries) {
         const id = (entry.target as HTMLElement).dataset.id;
@@ -604,21 +604,21 @@ function useVirtList<T extends Record<string, any>>(
           }
         }
       }
-      
+
       reactiveData.listTotalSize += diff;
-      
+
       // 如果有需要修正的方法进行修正
       if (fixTaskFn) {
         fixTaskFn();
       }
-      
+
       // 智能滚动修正：只在必要时且用户未滚动时进行
       if ((fixOffset || forceFixOffset) && diff !== 0 && !abortFixOffset) {
         // 清除之前的防抖定时器
         if (resizeDebounceTimer) {
           clearTimeout(resizeDebounceTimer);
         }
-        
+
         // 防抖处理：延迟执行滚动修正
         resizeDebounceTimer = setTimeout(() => {
           // 只在用户未主动滚动时进行修正
@@ -630,7 +630,7 @@ function useVirtList<T extends Record<string, any>>(
           resizeDebounceTimer = null;
         }, direction === 'forward' ? 50 : 100); // 向上滚动更快响应
       }
-      
+
       abortFixOffset = false;
     });
   }
@@ -692,7 +692,7 @@ function useVirtList<T extends Record<string, any>>(
     if (clientRefEl.value) {
       const rect = clientRefEl.value.getBoundingClientRect();
       const isVisible = rect.width > 0 && rect.height > 0;
-      
+
       if (isVisible && slotSize.clientSize === 0) {
         // 容器变为可见但尺寸记录为0，需要恢复尺寸
         checkAndRestoreContainerSize();
@@ -753,6 +753,7 @@ function useVirtList<T extends Record<string, any>>(
     calcListTotalSize();
     updateRange(reactiveData.inViewBegin);
     updateTotalVirtualSize();
+    scrollToOffset(reactiveData.offset);
     forceUpdate();
   });
 
